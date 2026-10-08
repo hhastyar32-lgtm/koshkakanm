@@ -49,3 +49,19 @@ npm start
 ## گرنگ
 
 پارەدان بە کارت/فاستپی/کی پارەدان لەم وەشانەدا بە شێوەی ڕاستەوخۆ نەبەستراوە. سیستەمەکە transaction و commission ـەکان هەژمار دەکات و شوێنی payment gateway دواتر ئامادەیە بۆ زیادکردن.
+
+## Railway — وێنەکان بەبێ Cloudinary
+
+ئەم وەشانە **هیچ Cloudinary پێویست ناکات**. وێنەکانی خاوەن شوێن لەسەر خودی سرڤەر و لە `UPLOAD_DIR` هەڵدەگیرێن و لە Database تەنها لینکی وێنەکە هەڵدەگیرێت.
+
+لە Railway یەک **Volume** زیاد بکە، بۆ نموونە بە Mount Path ـی:
+
+`/data`
+
+پاشان لە Variables ئەمانە دابنێ:
+
+`DATABASE_PATH=/data/koshkakan.db`
+
+`UPLOAD_DIR=/data/uploads`
+
+ئینجا Deploy/Restart بکە. لە سایتەکەدا بەکارهێنەر دەتوانێت تا 8 وێنە ڕاستەوخۆ لە Gallery ـی مۆبایل هەڵبژێرێت و وێنەکان بەبێ Cloudinary باربکرێن.

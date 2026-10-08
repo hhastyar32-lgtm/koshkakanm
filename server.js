@@ -10,10 +10,12 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DATABASE_PATH || path.join(__dirname, "data", "koshkakan.db");
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(path.dirname(DB_PATH), "uploads");
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@koshkakan.local";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "ChangeMe123!";
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
@@ -115,6 +117,7 @@ app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(rateLimit({ windowMs: 60 * 1000, limit: 180, standardHeaders: true, legacyHeaders: false }));
 app.use(express.static(path.join(__dirname, "public")));
+app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "30d", immutable: true }));
 
 function newSession(user) {
   const token = crypto.randomBytes(32).toString("hex");
@@ -150,6 +153,36 @@ function parseListing(row, favorite = false) {
     amenities: JSON.parse(row.amenities || "[]"),
     favorite: !!favorite
   };
+}
+
+function saveImages(images, listingId) {
+  if (!Array.isArray(images)) return [];
+  const selected = images.slice(0, 8);
+  const saved = [];
+  for (let i = 0; i < selected.length; i++) {
+    const src = String(selected[i] || "");
+    const match = src.match(/^data:image\/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=]+)$/i);
+    if (!match) {
+      if (/^https?:\/\//i.test(src) || src.startsWith("/uploads/")) { saved.push(src); continue; }
+      throw new Error("فۆرماتی وێنەکە پشتگیری ناکرێت.");
+    }
+    const ext = match[1].toLowerCase() === "jpg" ? "jpg" : match[1].toLowerCase();
+    const buffer = Buffer.from(match[2], "base64");
+    if (buffer.length > 6 * 1024 * 1024) throw new Error("قەبارەی وێنە زۆر گەورەیە.");
+    const name = `${listingId}-${i}-${crypto.randomBytes(8).toString("hex")}.${ext}`;
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), buffer);
+    saved.push(`/uploads/${name}`);
+  }
+  return saved;
+}
+
+function removeListingImages(images) {
+  for (const src of (Array.isArray(images) ? images : [])) {
+    if (!String(src).startsWith("/uploads/")) continue;
+    const name = path.basename(String(src));
+    const file = path.join(UPLOAD_DIR, name);
+    try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch {}
+  }
 }
 
 app.get("/api/me", auth, (req,res)=>res.json({user:req.user}));
@@ -214,15 +247,24 @@ app.post("/api/listings", auth, (req,res)=>{
   const rent=Number(b.rent_price)||0, sale=Number(b.sale_price)||0;
   if((b.purpose==="rent"||b.purpose==="both") && rent<=0) return res.status(400).json({error:"نرخی بەکرێدان دابین بکە."});
   if((b.purpose==="sale"||b.purpose==="both") && sale<=0) return res.status(400).json({error:"نرخی فرۆشتن دابین بکە."});
-  const r=db.prepare(`INSERT INTO listings
-    (owner_id,title,purpose,type,city,area,address,description,guests,bedrooms,bathrooms,rent_price,sale_price,phone,images,amenities)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      req.user.id,String(b.title).trim(),b.purpose,b.type,b.city,b.area||"",b.address||"",b.description||"",
-      Number(b.guests)||1,Number(b.bedrooms)||0,Number(b.bathrooms)||0,rent,sale,b.phone||req.user.phone||"",
-      JSON.stringify(Array.isArray(b.images)?b.images.slice(0,8):[]),
-      JSON.stringify(Array.isArray(b.amenities)?b.amenities.slice(0,20):[])
-    );
-  res.json({ok:true,id:r.lastInsertRowid,message:"لیستەکە نێردرا بۆ پەسەندکردنی بەڕێوەبەر."});
+  let imageFiles = [];
+  try {
+    // وێنەکان لە خودی سرڤەر/وۆڵیومی Railway هەڵدەگیرێن؛ هیچ Cloudinary پێویست نییە.
+    const nextId = Number(db.prepare("SELECT COALESCE(MAX(id),0)+1 AS id FROM listings").get().id);
+    imageFiles = saveImages(b.images, nextId);
+    const r=db.prepare(`INSERT INTO listings
+      (owner_id,title,purpose,type,city,area,address,description,guests,bedrooms,bathrooms,rent_price,sale_price,phone,images,amenities)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        req.user.id,String(b.title).trim(),b.purpose,b.type,b.city,b.area||"",b.address||"",b.description||"",
+        Number(b.guests)||1,Number(b.bedrooms)||0,Number(b.bathrooms)||0,rent,sale,b.phone||req.user.phone||"",
+        JSON.stringify(imageFiles),
+        JSON.stringify(Array.isArray(b.amenities)?b.amenities.slice(0,20):[])
+      );
+    res.json({ok:true,id:r.lastInsertRowid,message:"لیستەکە نێردرا بۆ پەسەندکردنی بەڕێوەبەر."});
+  } catch (e) {
+    removeListingImages(imageFiles);
+    res.status(400).json({error:e.message || "نەتوانرا وێنەکان هەڵبگیرێن."});
+  }
 });
 
 app.get("/api/my/listings", auth, (req,res)=>{
@@ -234,6 +276,7 @@ app.delete("/api/listings/:id", auth, (req,res)=>{
   const row=db.prepare("SELECT * FROM listings WHERE id=?").get(req.params.id);
   if(!row) return res.status(404).json({error:"لیست نەدۆزرایەوە."});
   if(row.owner_id!==req.user.id && req.user.role!=="admin") return res.status(403).json({error:"دەسەڵاتت نییە."});
+  removeListingImages(JSON.parse(row.images || "[]"));
   db.prepare("DELETE FROM listings WHERE id=?").run(req.params.id);
   res.json({ok:true});
 });
