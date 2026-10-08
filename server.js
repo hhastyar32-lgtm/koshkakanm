@@ -88,6 +88,14 @@ CREATE TABLE IF NOT EXISTS favorites (
   FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
   FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 `);
 
 function ensureAdmin() {
@@ -103,22 +111,26 @@ ensureAdmin();
 
 app.disable("x-powered-by");
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(rateLimit({ windowMs: 60 * 1000, limit: 180, standardHeaders: true, legacyHeaders: false }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const sessions = new Map();
 function newSession(user) {
   const token = crypto.randomBytes(32).toString("hex");
-  sessions.set(token, { userId: user.id, expires: Date.now() + 7 * 24 * 3600 * 1000 });
+  const expires = Date.now() + 30 * 24 * 3600 * 1000;
+  db.prepare("INSERT INTO auth_sessions(token,user_id,expires_at) VALUES(?,?,?)").run(token, user.id, expires);
+  db.prepare("DELETE FROM auth_sessions WHERE expires_at < ?").run(Date.now());
   return token;
 }
 function auth(req, res, next) {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-  const s = sessions.get(token);
-  if (!s || s.expires < Date.now()) return res.status(401).json({ error: "پێویستە بچیتە ژوورەوە." });
-  const user = db.prepare("SELECT id,name,email,phone,role FROM users WHERE id=?").get(s.userId);
+  const s = db.prepare("SELECT user_id,expires_at FROM auth_sessions WHERE token=?").get(token);
+  if (!s || s.expires_at < Date.now()) {
+    if (token) db.prepare("DELETE FROM auth_sessions WHERE token=?").run(token);
+    return res.status(401).json({ error: "پێویستە بچیتە ژوورەوە." });
+  }
+  const user = db.prepare("SELECT id,name,email,phone,role FROM users WHERE id=?").get(s.user_id);
   if (!user) return res.status(401).json({ error: "هەژمار نەدۆزرایەوە." });
   req.user = user;
   req.token = token;
@@ -166,7 +178,7 @@ app.post("/api/auth/login", async (req,res)=>{
   res.json({user, token:newSession(user)});
 });
 
-app.post("/api/auth/logout", auth, (req,res)=>{ sessions.delete(req.token); res.json({ok:true}); });
+app.post("/api/auth/logout", auth, (req,res)=>{ db.prepare("DELETE FROM auth_sessions WHERE token=?").run(req.token); res.json({ok:true}); });
 
 app.get("/api/listings", (req,res)=>{
   const {city="",type="",purpose="",q="",min=0,max=0,sort="newest",owner=""} = req.query;
